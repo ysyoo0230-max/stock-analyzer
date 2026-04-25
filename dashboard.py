@@ -121,9 +121,9 @@ def copy_button(text: str, label: str = "📋 결과 복사", key: str = ""):
 
 def call_ai(prompt: str) -> str:
     """Gemini API 호출 (google-genai SDK)"""
-    gemini_key = os.environ.get("GEMINI_KEY", "")
+    gemini_key = os.environ.get("GEMINI_KEY") or st.secrets.get("GEMINI_KEY", "")
     if not gemini_key:
-        return "❌ GEMINI_KEY 환경변수가 설정되지 않았습니다. .env 파일에 GEMINI_KEY=... 를 추가하세요."
+        return "❌ GEMINI_KEY가 설정되지 않았습니다. .env 또는 Streamlit Cloud Secrets에 GEMINI_KEY를 추가하세요."
     try:
         from google import genai
         from google.genai import types
