@@ -61,7 +61,8 @@ st.markdown("""<style>
 # ================================================
 TRACKING_FILE       = "signal_tracking.json"
 SIGNAL_HISTORY_FILE = "signal_history.csv"
-GEMINI_MODEL        = "gemini-2.0-flash"
+GEMINI_MODEL        = "gemini-2.0-flash-lite"
+GEMINI_FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash"]
 # .env 파일 자동 로드 (python-dotenv 없어도 동작)
 def _load_dotenv(path: str = ".env"):
     if not os.path.exists(path):
@@ -120,25 +121,30 @@ def copy_button(text: str, label: str = "📋 결과 복사", key: str = ""):
 
 
 def call_ai(prompt: str) -> str:
-    """Gemini API 호출 (google-genai SDK)"""
+    """Gemini API 호출 (google-genai SDK) — 429 시 fallback 모델 자동 시도"""
     gemini_key = os.environ.get("GEMINI_KEY") or st.secrets.get("GEMINI_KEY", "")
     if not gemini_key:
         return "❌ GEMINI_KEY가 설정되지 않았습니다. .env 또는 Streamlit Cloud Secrets에 GEMINI_KEY를 추가하세요."
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=gemini_key)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_GEMINI_SYSTEM,
-                temperature=0.7,
-            ),
-        )
-        return response.text.strip()
-    except Exception as e:
-        return f"❌ Gemini 오류: {e}"
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=gemini_key)
+    cfg = types.GenerateContentConfig(
+        system_instruction=_GEMINI_SYSTEM,
+        temperature=0.7,
+    )
+    for model in [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model, contents=prompt, config=cfg
+            )
+            return response.text.strip()
+        except Exception as e:
+            err = str(e)
+            if ("429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower()
+                    or "404" in err or "NOT_FOUND" in err):
+                continue  # 다음 fallback 모델 시도
+            return f"❌ Gemini 오류: {e}"
+    return "❌ Gemini API 할당량이 모두 소진되었습니다. 내일 다시 시도하세요."
 
 
 @st.cache_data(ttl=1800)
