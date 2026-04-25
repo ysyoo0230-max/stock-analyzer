@@ -1,0 +1,24 @@
+# 환경 변수 / 시크릿
+.env
+.streamlit/secrets.toml
+
+# 데이터 파일 (로컬 생성)
+*.csv
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# 백업 / 테스트
+*_backup.py
+*_test.py
+
+# IDE
+.vscode/
+.idea/
+*.log
