@@ -82,6 +82,7 @@ DART_KEY = (
     or os.environ.get("DART_API_KEY")
     or os.environ.get("crtfc_key", "")
 )
+FRED_KEY = os.environ.get("FRED_API_KEY", "")
 
 _PERIOD_MAP = {"3개월": "3mo", "6개월": "6mo", "1년": "1y", "2년": "2y"}
 
@@ -154,38 +155,97 @@ def search_kr_stock(name: str) -> pd.DataFrame:
 # 데이터 로드
 # ================================================
 @st.cache_data(ttl=300)
+def _postprocess_screener_df(df: pd.DataFrame) -> pd.DataFrame:
+    """CSV·실시간 공통 후처리: 이상치 제거 + 이론PBR 계산"""
+    if df.empty:
+        return df
+    if "PER"    in df.columns: df = df[df["PER"]    > 0]
+    if "PBR"    in df.columns: df = df[df["PBR"]    > 0]
+    if "ROE(%)" in df.columns: df = df[(df["ROE(%)"] > 0) & (df["ROE(%)"] <= 500)]
+    if "이론PBR" not in df.columns and all(c in df.columns for c in ["PER","PBR","ROE(%)"]):
+        df = df.copy()
+        df["이론PBR"] = (df["PER"] * df["ROE(%)"] / 100).round(2)
+        valid = df["이론PBR"] > 0
+        df.loc[valid, "괴리율(%)"] = (
+            (df.loc[valid,"이론PBR"] - df.loc[valid,"PBR"]) / df.loc[valid,"이론PBR"] * 100
+        ).round(1)
+    return df.reset_index(drop=True)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_live_screener(prefix: str) -> pd.DataFrame:
+    """CSV 없을 때 실시간 수집 (24시간 캐시)"""
+    try:
+        import screener as sc
+        # 모듈 레벨 변수 동기화 (import 시 env var가 없었을 경우 대비)
+        if DART_KEY:
+            sc._DART_KEY = DART_KEY
+            os.environ["DART_API_KEY"] = DART_KEY
+        if FRED_KEY:
+            sc._FRED_KEY = FRED_KEY
+            os.environ["FRED_API_KEY"] = FRED_KEY
+        if prefix == "us":
+            return sc.get_us_screener(per_threshold=25)
+        elif prefix == "kospi_섹터별":
+            df = sc.get_krx_screener_dart("KOSPI",  max_stocks=200) if DART_KEY else sc.get_krx_screener("KOSPI",  max_stocks=100)
+            return df
+        elif prefix == "kosdaq_섹터별":
+            df = sc.get_krx_screener_dart("KOSDAQ", max_stocks=400) if DART_KEY else sc.get_krx_screener("KOSDAQ", max_stocks=150)
+            return df
+    except Exception as e:
+        st.warning(f"실시간 데이터 수집 실패: {e}")
+    return pd.DataFrame()
+
+
 def load_latest_csv(prefix: str):
+    """CSV 우선 로드 → 없으면 실시간 수집 fallback"""
     files = sorted(glob.glob(f"{prefix}_*.csv"), reverse=True)
-    if not files:
+    if files:
+        try:
+            df = pd.read_csv(files[0], encoding="utf-8-sig")
+            if not df.empty and len(df.columns) > 0:
+                df = _postprocess_screener_df(df)
+                mtime = os.path.getmtime(files[0])
+                return df, datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    # CSV 없음 → 실시간 수집
+    with st.spinner(f"📡 실시간 데이터 수집 중... (첫 로드는 수 분 소요될 수 있습니다)"):
+        df = _fetch_live_screener(prefix)
+    df = _postprocess_screener_df(df)
+    if df.empty:
         return pd.DataFrame(), None
+    return df, datetime.now().strftime("%Y-%m-%d %H:%M") + " (실시간)"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_live_macro() -> pd.DataFrame:
+    """FRED API 직접 호출로 거시지표 수집 (24시간 캐시)"""
+    if not FRED_KEY:
+        return pd.DataFrame()
     try:
-        df = pd.read_csv(files[0], encoding="utf-8-sig")
-        if df.empty or len(df.columns) == 0:
-            return pd.DataFrame(), None
-        if "PER"    in df.columns: df = df[df["PER"]    > 0]
-        if "PBR"    in df.columns: df = df[df["PBR"]    > 0]
-        if "ROE(%)" in df.columns: df = df[(df["ROE(%)"] > 0) & (df["ROE(%)"] <= 500)]
-        if "이론PBR" not in df.columns and all(c in df.columns for c in ["PER","PBR","ROE(%)"]):
-            df["이론PBR"] = (df["PER"] * df["ROE(%)"] / 100).round(2)
-            valid = df["이론PBR"] > 0
-            df.loc[valid, "괴리율(%)"] = (
-                (df.loc[valid,"이론PBR"] - df.loc[valid,"PBR"]) / df.loc[valid,"이론PBR"] * 100
-            ).round(1)
-        mtime = os.path.getmtime(files[0])
-        return df.reset_index(drop=True), datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        import screener as sc
+        if FRED_KEY:
+            sc._FRED_KEY = FRED_KEY
+            os.environ["FRED_API_KEY"] = FRED_KEY
+        return sc.get_macro_data()
     except Exception:
-        return pd.DataFrame(), None
+        return pd.DataFrame()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_macro_csv():
+    """CSV 우선 로드 → 없으면 FRED 실시간 fallback"""
     files = sorted(glob.glob("macro_*.csv"), reverse=True)
-    if not files:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(files[0], encoding="utf-8-sig")
-    except Exception:
-        return pd.DataFrame()
+    if files:
+        try:
+            df = pd.read_csv(files[0], encoding="utf-8-sig")
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    return _fetch_live_macro()
 
 
 @st.cache_data(ttl=3600)
