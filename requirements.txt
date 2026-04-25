@@ -5,4 +5,4 @@ yfinance==1.2.0
 requests==2.33.1
 python-dotenv==1.2.2
 finance-datareader==0.9.110
-google-generativeai==0.8.6
+google-genai==1.73.1

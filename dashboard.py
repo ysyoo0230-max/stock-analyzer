@@ -120,18 +120,22 @@ def copy_button(text: str, label: str = "📋 결과 복사", key: str = ""):
 
 
 def call_ai(prompt: str) -> str:
-    """Gemini API 호출"""
+    """Gemini API 호출 (google-genai SDK)"""
     gemini_key = os.environ.get("GEMINI_KEY", "")
     if not gemini_key:
         return "❌ GEMINI_KEY 환경변수가 설정되지 않았습니다. .env 파일에 GEMINI_KEY=... 를 추가하세요."
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=_GEMINI_SYSTEM,
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=gemini_key)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=_GEMINI_SYSTEM,
+                temperature=0.7,
+            ),
         )
-        response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"❌ Gemini 오류: {e}"
