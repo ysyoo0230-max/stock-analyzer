@@ -2225,3 +2225,173 @@ with tab_bt:
                 _df_sig = pd.DataFrame(_signals)
                 _df_sig.insert(0, "#", range(1, len(_df_sig) + 1))
                 st.dataframe(_df_sig, hide_index=True, width="stretch")
+
+    # ══════════════════════════════════════════════════════
+    # 전체 종목 일괄 백테스팅
+    # ══════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("📦 전체 종목 일괄 백테스팅")
+    st.caption("스크리너 필터 적용 후 전체 종목을 한 번에 백테스팅합니다. 종목 수가 많을수록 시간이 오래 걸립니다.")
+
+    _bulk_c1, _bulk_c2, _bulk_c3 = st.columns([1, 1, 2])
+    with _bulk_c1:
+        _bulk_years = st.selectbox("백테스트 기간", [1, 2, 3], index=1,
+                                   format_func=lambda x: f"{x}년", key="bulk_bt_years")
+    with _bulk_c2:
+        _bulk_max = st.number_input("최대 종목 수", min_value=5, max_value=200,
+                                    value=50, step=5, key="bulk_bt_max",
+                                    help="시간 단축을 위해 상위 N개만 실행")
+    with _bulk_c3:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        _bulk_run = st.button("▶ 전체 일괄 백테스팅 실행", key="bulk_bt_run",
+                              type="primary", width="stretch")
+
+    if _bulk_run:
+        if df_base.empty:
+            st.warning("스크리너 데이터가 없습니다.")
+        else:
+            # 종목 목록 준비
+            _bulk_df = df_base.head(int(_bulk_max)).copy()
+            _bulk_total = len(_bulk_df)
+            _bulk_results = []
+
+            _prog_bar  = st.progress(0, text="준비 중...")
+            _prog_text = st.empty()
+
+            for _bi, (_bidx, _brow) in enumerate(_bulk_df.iterrows()):
+                _bcode = str(_brow.get("코드", ""))
+                _bname = str(_brow.get("종목명", _bcode))
+                _bsect = str(_brow.get("섹터", "기타"))
+                _bmkt  = str(_brow.get("시장", "KR" if is_kr else "US"))
+                _btick = ((_bcode.zfill(6) if is_kr else _bcode) + suffix)
+
+                _prog_bar.progress(
+                    (_bi) / _bulk_total,
+                    text=f"진행 중: {_bi+1}/{_bulk_total}  {_bname}"
+                )
+                _prog_text.caption(f"분석 중: **{_bname}** ({_btick})")
+
+                try:
+                    _bres = run_backtest(_btick, int(_bulk_years))
+                except Exception:
+                    _bres = {}
+
+                _bsigs = _bres.get("signals", []) if _bres else []
+                _n_sig = len(_bsigs)
+
+                _row_data = {
+                    "종목명":   _bname,
+                    "코드":     _bcode,
+                    "업종":     _bsect,
+                    "시장":     _bmkt,
+                    "신호횟수": _n_sig,
+                }
+                for _h in [5, 10, 20, 60, 120]:
+                    _cn = f"{_h}일수익률"
+                    _hv = [s[_cn] for s in _bsigs if s.get(_cn) is not None]
+                    if _hv:
+                        _row_data[f"{_h}일평균(%)"] = round(sum(_hv) / len(_hv), 2)
+                        _row_data[f"{_h}일승률(%)"] = round(
+                            sum(1 for v in _hv if v > 0) / len(_hv) * 100, 1)
+                    else:
+                        _row_data[f"{_h}일평균(%)"] = None
+                        _row_data[f"{_h}일승률(%)"] = None
+
+                _bulk_results.append(_row_data)
+
+            _prog_bar.progress(1.0, text=f"완료: {_bulk_total}개 종목 분석")
+            _prog_text.empty()
+
+            if _bulk_results:
+                _df_bulk = pd.DataFrame(_bulk_results)
+                st.session_state["bulk_bt_result"] = _df_bulk
+                st.session_state["bulk_bt_years"]  = int(_bulk_years)
+
+    # ── 일괄 결과 표시 (세션 유지) ──
+    if "bulk_bt_result" in st.session_state:
+        _df_bulk = st.session_state["bulk_bt_result"]
+        _bk_years = st.session_state.get("bulk_bt_years", 2)
+
+        st.markdown(f"#### 📊 일괄 백테스팅 결과 — {_bk_years}년  ({len(_df_bulk)}종목)")
+
+        # ── ① 종목별 요약 테이블 ──
+        st.markdown("##### 종목별 요약")
+        _avg_cols = [c for c in _df_bulk.columns if "평균" in c]
+        _wr_cols  = [c for c in _df_bulk.columns if "승률" in c]
+
+        def _color_avg(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return ""
+            return "color: #40a02b" if val > 0 else "color: #e64553"
+
+        def _color_wr(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return ""
+            if val >= 60:
+                return "background-color: #d4edda; color: #155724"
+            elif val < 40:
+                return "background-color: #f8d7da; color: #721c24"
+            return ""
+
+        _df_bulk_disp = _df_bulk.sort_values("신호횟수", ascending=False).reset_index(drop=True)
+        _styled = (
+            _df_bulk_disp.style
+            .applymap(_color_avg, subset=_avg_cols)
+            .applymap(_color_wr,  subset=_wr_cols)
+            .format({c: lambda v: f"{v:+.2f}" if pd.notna(v) else "—" for c in _avg_cols})
+            .format({c: lambda v: f"{v:.1f}" if pd.notna(v) else "—" for c in _wr_cols})
+        )
+        st.dataframe(_styled, hide_index=True, width="stretch")
+
+        # ── ② 업종별 평균 집계 ──
+        st.markdown("##### 업종별 평균 집계")
+        _sect_grp = _df_bulk.groupby("업종", dropna=False)
+        _sect_rows = []
+        for _sname, _sg in _sect_grp:
+            _s_row = {"업종": _sname, "종목수": len(_sg)}
+            for _h in [5, 10, 20, 60, 120]:
+                _acol = f"{_h}일평균(%)"
+                _wcol = f"{_h}일승률(%)"
+                _avals = _sg[_acol].dropna().tolist()
+                _wvals = _sg[_wcol].dropna().tolist()
+                _s_row[_acol] = round(sum(_avals)/len(_avals), 2) if _avals else None
+                _s_row[_wcol] = round(sum(_wvals)/len(_wvals), 1) if _wvals else None
+            _sect_rows.append(_s_row)
+
+        _df_sect = pd.DataFrame(_sect_rows).sort_values("20일승률(%)", ascending=False,
+                                                         na_position="last").reset_index(drop=True)
+
+        # 상위 3개 업종 하이라이트
+        _top3_sects = set(_df_sect.head(3)["업종"].tolist())
+
+        def _highlight_top3(row):
+            if row["업종"] in _top3_sects:
+                return ["background-color: #fff9c4"] * len(row)
+            return [""] * len(row)
+
+        _sect_avg_cols = [c for c in _df_sect.columns if "평균" in c]
+        _sect_wr_cols  = [c for c in _df_sect.columns if "승률" in c]
+        _styled_sect = (
+            _df_sect.style
+            .apply(_highlight_top3, axis=1)
+            .applymap(_color_wr,  subset=_sect_wr_cols)
+            .format({c: lambda v: f"{v:+.2f}" if pd.notna(v) else "—" for c in _sect_avg_cols})
+            .format({c: lambda v: f"{v:.1f}" if pd.notna(v) else "—" for c in _sect_wr_cols})
+        )
+        st.dataframe(_styled_sect, hide_index=True, width="stretch")
+        st.caption(
+            f"★ 노란색 업종({', '.join(sorted(_top3_sects))})은 20일 평균 승률 기준 상위 3개 업종입니다."
+            if _top3_sects else ""
+        )
+
+        # ── ③ CSV 저장 ──
+        st.markdown("##### 결과 저장")
+        _csv_bytes = _df_bulk.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        _csv_fname = f"backtest_bulk_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        st.download_button(
+            label="💾 결과 CSV 저장",
+            data=_csv_bytes,
+            file_name=_csv_fname,
+            mime="text/csv",
+            key="bulk_bt_csv",
+        )
