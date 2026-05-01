@@ -84,12 +84,12 @@ def get_gemini_comment(data: dict) -> str:
         summary = "  /  ".join(f"{k} {v['chg']:+.2f}%" for k, v in data.items())
         prompt = (
             f"오늘 글로벌 시장 변동: {summary}\n"
-            "한국 주식 투자자 관점에서 이 시황을 한 문장으로 요약해줘. "
-            "이모지 포함, 80자 이내, 핵심 흐름과 투자 시사점 위주로."
+            "한국 주식 투자자 관점에서 이 시황을 한 문장으로 완성해줘. "
+            "이모지 포함, 핵심 흐름과 투자 시사점 위주로. 문장을 반드시 끝까지 완성할 것."
         )
         for model in [GEMINI_MODEL] + GEMINI_FALLBACK:
             try:
-                cfg = genai.types.GenerateContentConfig(temperature=0.7, max_output_tokens=200)
+                cfg = genai.types.GenerateContentConfig(temperature=0.7, max_output_tokens=512)
                 resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
                 return resp.text.strip()
             except Exception as e:
