@@ -67,11 +67,29 @@ GROUPS = {
 }
 
 
+def _trend_label(pct_vs_ma: float) -> str:
+    """MA50 대비 괴리율 → 추세 라벨"""
+    if pct_vs_ma > 10:  return "🔥과열"
+    if pct_vs_ma > 2:   return "📈상승추세"
+    if pct_vs_ma > -2:  return "➡️횡보"
+    if pct_vs_ma > -10: return "📉조정"
+    return "🔻하락추세"
+
+
+def _high_label(pct_from_high: float) -> str:
+    """52주 고점 대비 % → 상태 라벨"""
+    if pct_from_high > -3:   return "🏔️고점근처"
+    if pct_from_high > -10:  return "⚡고점권"
+    if pct_from_high > -20:  return "⚠️조정구간"
+    return "🔻급락구간"
+
+
 def fetch_market_data() -> dict:
     results = {}
     tickers = [t for _, t, _ in INDICATORS] + [SPREAD_LONG, SPREAD_SHORT]
     try:
-        raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+        # 1년 데이터: MA50 + 52주 고저점 계산용
+        raw = yf.download(tickers, period="1y", progress=False, auto_adjust=True)
         if raw.empty:
             return results
         close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]]
@@ -91,7 +109,23 @@ def fetch_market_data() -> dict:
         curr = float(series.iloc[-1])
         prev = float(series.iloc[-2])
         chg  = (curr - prev) / prev * 100 if prev else 0.0
-        results[name] = {"current": curr, "prev": prev, "chg": chg, "fmt": fmt_fn}
+
+        # MA50 대비
+        ma50 = float(series.rolling(50).mean().iloc[-1]) if len(series) >= 50 else None
+        pct_ma50 = (curr - ma50) / ma50 * 100 if ma50 else None
+
+        # 52주 고점/저점 대비
+        high52 = float(series.max())
+        low52  = float(series.min())
+        pct_from_high = (curr - high52) / high52 * 100
+        pct_from_low  = (curr - low52)  / low52  * 100
+
+        results[name] = {
+            "current": curr, "prev": prev, "chg": chg, "fmt": fmt_fn,
+            "pct_ma50": pct_ma50,
+            "pct_from_high": pct_from_high,
+            "pct_from_low":  pct_from_low,
+        }
 
     # 장단기금리차 (spread = 10Y - 3M, 단위: %p)
     if SPREAD_LONG in close.columns and SPREAD_SHORT in close.columns:
@@ -99,13 +133,22 @@ def fetch_market_data() -> dict:
         s_short = close[SPREAD_SHORT].dropna()
         idx     = s_long.index.intersection(s_short.index)
         if len(idx) >= 2:
-            curr = float(s_long.loc[idx[-1]]) - float(s_short.loc[idx[-1]])
-            prev = float(s_long.loc[idx[-2]]) - float(s_short.loc[idx[-2]])
-            chg  = curr - prev  # %p 변화량
+            spreads = s_long.loc[idx] - s_short.loc[idx]
+            curr = float(spreads.iloc[-1])
+            prev = float(spreads.iloc[-2])
+            chg  = curr - prev
+            ma50_sp  = float(spreads.rolling(50).mean().iloc[-1]) if len(spreads) >= 50 else None
+            pct_ma50 = (curr - ma50_sp) / abs(ma50_sp) * 100 if ma50_sp else None
+            high52   = float(spreads.max())
+            low52    = float(spreads.min())
+            pct_from_high = (curr - high52) / abs(high52) * 100 if high52 else None
             results[SPREAD_NAME] = {
                 "current": curr, "prev": prev, "chg": chg,
                 "fmt": lambda v: f"{v:+.3f}%p",
-                "chg_is_abs": True,   # 변화량이 % 아닌 절댓값
+                "chg_is_abs": True,
+                "pct_ma50": pct_ma50,
+                "pct_from_high": pct_from_high,
+                "pct_from_low": None,
             }
 
     return results
@@ -181,13 +224,27 @@ def build_blocks(data: dict, comment: str) -> list:
         for name in names:
             if name not in data:
                 continue
-            v       = data[name]
-            chg     = v["chg"]
-            is_abs  = v.get("chg_is_abs", False)
-            arrow   = _arrow(chg, is_abs)
-            price   = v["fmt"](v["current"])
-            chg_str = f"{chg:+.3f}%p" if is_abs else f"{chg:+.2f}%"
-            lines.append(f"{arrow} *{name}*: {price}  `({chg_str})`")
+            v        = data[name]
+            chg      = v["chg"]
+            is_abs   = v.get("chg_is_abs", False)
+            arrow    = _arrow(chg, is_abs)
+            price    = v["fmt"](v["current"])
+            chg_str  = f"{chg:+.3f}%p" if is_abs else f"{chg:+.2f}%"
+
+            # 추세 정보 (MA50 + 52주 고점)
+            extra_parts = []
+            pct_ma50 = v.get("pct_ma50")
+            pct_high = v.get("pct_from_high")
+            if pct_ma50 is not None:
+                extra_parts.append(f"MA50 {pct_ma50:+.1f}% {_trend_label(pct_ma50)}")
+            if pct_high is not None:
+                extra_parts.append(f"52주고점 {pct_high:+.1f}% {_high_label(pct_high)}")
+            extra = "  ·  ".join(extra_parts)
+
+            line = f"{arrow} *{name}*: {price}  `({chg_str})`"
+            if extra:
+                line += f"\n    └ {extra}"
+            lines.append(line)
 
         if lines:
             blocks.append({
