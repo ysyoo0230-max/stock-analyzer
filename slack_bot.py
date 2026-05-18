@@ -201,6 +201,24 @@ def fetch_market_data() -> dict:
 
 
 # ── Gemini AI 코멘트 ──────────────────────────────────────────────────────────
+_SENTENCE_ENDERS = ("다.", "요.", "죠.", "네.", "다!", "요!", "다?", "니다.", "습니다.", "겠습니다.")
+
+def _is_complete(text: str) -> bool:
+    """한국어 문장이 완전히 끝났는지 확인."""
+    t = text.strip()
+    return any(t.endswith(e) for e in _SENTENCE_ENDERS) or t.endswith(("!", "?", "."))
+
+
+def _call_gemini(client, model: str, prompt: str, max_tokens: int) -> tuple[str, str]:
+    """Gemini 호출 → (text, finish_reason) 반환."""
+    import google.genai as genai
+    cfg  = genai.types.GenerateContentConfig(temperature=0.7, max_output_tokens=max_tokens)
+    resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
+    text   = resp.text.strip() if resp.text else ""
+    reason = str(resp.candidates[0].finish_reason) if resp.candidates else "UNKNOWN"
+    return text, reason
+
+
 def get_gemini_comment(data: dict) -> str:
     if not GEMINI_KEY or not data:
         return ""
@@ -221,19 +239,39 @@ def get_gemini_comment(data: dict) -> str:
                 line += f" / 52주고점比 {hi:+.1f}%"
             lines.append(line)
 
-        prompt = (
+        prompt_full = (
             "아래는 오늘의 글로벌 매크로 핵심 4대 지표야:\n"
             + "\n".join(lines) + "\n\n"
             "한국 주식 투자자 관점에서 '돈과 물건의 흐름' 측면으로 "
             "이 4개 지표가 현재 시장에 보내는 종합 신호를 한 문장으로 완성해줘. "
             "이모지 포함, 경기 사이클 위치와 리스크 온/오프 판단 위주로. "
-            "반드시 완전한 문장으로 끝내야 하며 절대 중간에 끊기지 않아야 함."
+            "반드시 마침표로 끝나는 완전한 한 문장만 출력할 것."
         )
+        # 짧게 재시도용 프롬프트
+        prompt_short = (
+            "아래는 오늘의 글로벌 매크로 핵심 4대 지표야:\n"
+            + "\n".join(lines) + "\n\n"
+            "한국 주식 투자자에게 리스크 온/오프 여부를 이모지 포함 30자 이내 짧은 한 문장으로 알려줘. "
+            "반드시 마침표로 끝낼 것."
+        )
+
         for model in [GEMINI_MODEL] + GEMINI_FALLBACK:
             try:
-                cfg  = genai.types.GenerateContentConfig(temperature=0.7, max_output_tokens=1024)
-                resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
-                return resp.text.strip()
+                text, reason = _call_gemini(client, model, prompt_full, max_tokens=1024)
+                print(f"[Gemini] model={model} finish_reason={reason} len={len(text)}", file=sys.stderr)
+
+                if _is_complete(text):
+                    return text
+
+                # 잘린 경우: 짧은 프롬프트로 재시도
+                print(f"[Gemini] 문장 미완성({reason}), 짧은 프롬프트로 재시도", file=sys.stderr)
+                text2, reason2 = _call_gemini(client, model, prompt_short, max_tokens=512)
+                print(f"[Gemini] 재시도 finish_reason={reason2} len={len(text2)}", file=sys.stderr)
+                if text2:
+                    return text2
+                # 재시도도 실패 시 원본 반환
+                return text if text else ""
+
             except Exception as e:
                 if any(x in str(e) for x in ("429", "404", "NOT_FOUND")):
                     continue
